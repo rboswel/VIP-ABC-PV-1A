@@ -28,7 +28,8 @@ int main()
     gpio_pull_up(PIN_SCL);
     while(true)
     {
-        uint16_t readings[18] = read_light(readings);
+        uint16_t readings[12];
+        read_light(readings);
         uint32_t PAR = isolate_par(readings);
         //need some testing from here: What amount of PAR does the sensor get during the day at full brightness outdoors?
         //50-70% of that is the target as I recall. From there, we can begin determining when to rotate the panel. 
@@ -42,7 +43,7 @@ int main()
 //need to find "sweet spot" amount of light to balance plant and panel light, panel should
 //adjust to meet this 
 
-int* read_light(uint16_t readings[18])
+void read_light(uint16_t readings[18])
 {
     // Brief delay to allow the USB serial monitor to connect
 
@@ -68,7 +69,7 @@ int* read_light(uint16_t readings[18])
     if (!as7343_read_channels(I2C_PORT, readings)) {
         printf("Read failed!\n");
         sleep_ms(500);
-        return 0;
+        return;
     }
 
     // Print spectral channels in wavelength order using printf
@@ -88,7 +89,6 @@ int* read_light(uint16_t readings[18])
     printf("VIS (clear):              %u\n", readings[12]);
 
     sleep_ms(500);
-    return readings;
 
 }
 
@@ -96,7 +96,7 @@ uint32_t isolate_par(int* readings)
 {
     uint32_t par_sum = 0;
 
-    // Aggregate channels F1 through F7 (covering ~400nm to 700nm)
+    // Aggregate channels F1 through F7 (covering ~400nm to ~750nm)
     par_sum += readings[0];
     par_sum += readings[1];
     par_sum += readings[2];
