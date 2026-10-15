@@ -107,6 +107,7 @@ uint32_t isolate_par(int* readings)
     par_sum += readings[7];
     par_sum += readings[8];
     par_sum += readings[9];
+    par_sum += readings[10];
 
     printf("Estimated PAR Intensity (400-700nm): %u\n", par_sum);
     return par_sum;
