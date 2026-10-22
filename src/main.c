@@ -36,6 +36,7 @@ int main()
         //Actual panel solar collection data should be collected and implemented, but this will likely just be recorded
         //and not used to make rotational decisions.
         //TODO: Motor rotation code
+        sleep_ms(250); //Readings taken every quarter second
     }
 }
 
