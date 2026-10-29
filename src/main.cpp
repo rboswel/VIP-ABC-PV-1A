@@ -37,7 +37,7 @@ int main()
         uint16_t readings[12];
         read_light(readings);
         uint32_t PAR = isolate_par(readings);
-        printf(PAR);
+        printf((char*) PAR);
         fprintf(fp, "%d\n", PAR);
         //need some testing from here: What amount of PAR does the sensor get during the day at full brightness outdoors?
         //50-70% of that is the target as I recall. From there, we can begin determining when to rotate the panel. 
@@ -104,7 +104,7 @@ void read_light(uint16_t readings[18])
 
 }
 
-uint32_t isolate_par(int* readings)
+uint32_t isolate_par(uint16_t* readings)
 {
     uint32_t par_sum = 0;
 
