@@ -6,7 +6,7 @@
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 
-// Define I2C pins
+// Define I2C pins (e.g., GPIO 4 for SDA, GPIO 5 for SCL)
 #define I2C_PORT i2c0
 #define PIN_SDA 4
 #define PIN_SCL 5
@@ -26,19 +26,11 @@ int main()
     gpio_set_function(PIN_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_SDA);
     gpio_pull_up(PIN_SCL);
-    const char *filename = "data.csv";
-    FILE *fp = fopen(filename, "a");
-    if (fp == NULL) {
-        printf("Error: Could not open file for appending.\n");
-        return 1;
-    }
     while(true)
     {
         uint16_t readings[12];
         read_light(readings);
         uint32_t PAR = isolate_par(readings);
-        printf(PAR);
-        fprintf(fp, "%d\n", PAR);
         //need some testing from here: What amount of PAR does the sensor get during the day at full brightness outdoors?
         //50-70% of that is the target as I recall. From there, we can begin determining when to rotate the panel. 
         //Actual panel solar collection data should be collected and implemented, but this will likely just be recorded
@@ -46,8 +38,6 @@ int main()
         //TODO: Motor rotation code
         sleep_ms(250); //Readings taken every quarter second
     }
-    fclose(fp);
-    return(0);
 }
 
 //Code to read light sensors, code to get solar data from controller, code to drive motor
@@ -99,7 +89,6 @@ void read_light(uint16_t readings[18])
     printf("NIR (855nm near-IR):      %u\n", readings[11]);
     printf("VIS (clear):              %u\n", readings[12]);
 
-
     sleep_ms(500);
 
 }
@@ -124,4 +113,3 @@ uint32_t isolate_par(int* readings)
     printf("Estimated PAR Intensity (400-700nm): %u\n", par_sum);
     return par_sum;
 }
-
