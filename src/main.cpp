@@ -6,15 +6,15 @@
 #define TCA_ADDR 0x70
 
 // --- TMC2209 PIN DEFINITIONS (Adjust to your wiring on the RP2350B) ---
-#define STEP_PIN   2
-#define DIR_PIN    3
-#define EN_PIN     4   // Optional: TMC2209 enable pin (active low)
+#define STEP_PIN    16
+#define DIR_PIN     17
+//#define EN_PIN     4   // Optional: TMC2209 enable pin (active low)
 
 // --- MOTOR SETTINGS ---
 #define CW        HIGH
 #define CCW       LOW
 #define STEP_DELAY_US 1000 // Speed of motor steps (microseconds between pulses)
-#define SEARCH_STEP_SIZE 50 // Number of steps for a "slight" rotation
+#define SEARCH_STEP_SIZE 200 // Number of steps for a "slight" rotation
 
 Adafruit_AS7343 as7343;
 
@@ -35,8 +35,8 @@ void setup() {
     // Configure Motor Pins
     pinMode(STEP_PIN, OUTPUT);
     pinMode(DIR_PIN, OUTPUT);
-    pinMode(EN_PIN, OUTPUT);
-    digitalWrite(EN_PIN, LOW); // Enable driver (active low)
+    //pinMode(EN_PIN, OUTPUT);
+    //digitalWrite(EN_PIN, LOW); // Enable driver (active low)
 
     Wire.begin();
 
@@ -57,6 +57,14 @@ void setup() {
         as7343.setASTEP(599);
         
         Serial.printf("Sensor on Channel %u initialized successfully!\n", i);
+        
+        // Test pulse on startup
+        for(int j = 0; j < 200; j++) {
+            digitalWrite(STEP_PIN, HIGH);
+            delayMicroseconds(500);
+            digitalWrite(STEP_PIN, LOW);
+            delayMicroseconds(500);
+        }
     }
 
     Serial.println("\nAverage_PAR_Value");
@@ -67,66 +75,99 @@ void loop() {
     uint32_t currentLight = getCleanLightReading();
     Serial.printf("Current Average PAR: %u\n", currentLight);
 
-    // 2. Check threshold trigger (< 750 average)
-    if (currentLight < 750) {
-        Serial.println("Average light dropped below 750. Initiating search...");
+    // 2. Check threshold trigger (< 20 average)
+    if (currentLight < 25) {
+        Serial.println("Average light dropped below 25. Initiating search and tracking loop...");
 
-        uint32_t startLight = currentLight;
+        // Keep searching and adjusting until light level goes above 20
+        while (currentLight < 20) {
+            // Refresh and print current light level at the start of each iteration
+            currentLight = getCleanLightReading();
+            Serial.printf("Active Search Loop - Current Average PAR: %u\n", currentLight);
 
-        // --- STEP A: Rotate slightly Clockwise ---
-        stepMotor(CW, SEARCH_STEP_SIZE);
-        uint32_t cwLight = getCleanLightReading();
-        Serial.printf("After CW move - Average PAR: %u\n", cwLight);
+            if (currentLight >= 20) {
+                break; // Exit loop immediately if target is met
+            }
 
-        if (cwLight < startLight) {
-            // --- STEP B: CW was worse. Return to start, then try CCW ---
-            Serial.println("CW light is lower. Returning to start and trying CCW...");
-            stepMotor(CCW, SEARCH_STEP_SIZE); // Back to start
+            uint32_t startLight = currentLight;
 
-            stepMotor(CCW, SEARCH_STEP_SIZE); // Move CCW relative to start
-            uint32_t ccwLight = getCleanLightReading();
-            Serial.printf("After CCW move - Average PAR: %u\n", ccwLight);
+            // --- STEP A: Rotate slightly Clockwise ---
+            stepMotor(CW, SEARCH_STEP_SIZE);
+            uint32_t cwLight = getCleanLightReading();
+            Serial.printf("After CW move - Average PAR: %u\n", cwLight);
 
-            if (ccwLight < startLight) {
-                // --- STEP C: Both CW and CCW are lower than start -> Stay at starting position ---
-                Serial.println("Both directions lower than start. Returning to starting position.");
-                stepMotor(CW, SEARCH_STEP_SIZE); // Return to original position
+            // Check if threshold is met after first move
+            if (cwLight >= 20) {
+                currentLight = cwLight;
+                break;
+            }
+
+            if (cwLight < startLight) {
+                // --- STEP B: CW was worse. Return to start, then try CCW ---
+                Serial.println("CW light is lower. Returning to start and trying CCW...");
+                stepMotor(CCW, SEARCH_STEP_SIZE); // Back to start
+
+                stepMotor(CCW, SEARCH_STEP_SIZE); // Move CCW relative to start
+                uint32_t ccwLight = getCleanLightReading();
+                Serial.printf("After CCW move - Average PAR: %u\n", ccwLight);
+
+                if (ccwLight >= 20) {
+                    currentLight = ccwLight;
+                    break;
+                }
+
+                if (ccwLight < startLight) {
+                    // --- STEP C: Both CW and CCW are lower than start -> Stay at starting position ---
+                    Serial.println("Both directions lower than start. Returning to starting position.");
+                    stepMotor(CW, SEARCH_STEP_SIZE); // Return to original position
+                } else {
+                    // --- STEP D: CCW got better -> Keep tracking CCW until light stops increasing ---
+                    Serial.println("CCW improved. Tracking CCW...");
+                    uint32_t previousLight = ccwLight;
+                    while (true) {
+                        stepMotor(CCW, SEARCH_STEP_SIZE);
+                        uint32_t nextLight = getCleanLightReading();
+                        Serial.printf("Tracking CCW - Average PAR: %u\n", nextLight);
+
+                        if (nextLight >= 20) {
+                            currentLight = nextLight;
+                            break;
+                        }
+
+                        if (nextLight <= previousLight) {
+                            // Light stopped increasing or dropped, step back one increment to peak position
+                            stepMotor(CW, SEARCH_STEP_SIZE); 
+                            break;
+                        }
+                        previousLight = nextLight;
+                    }
+                }
+
             } else {
-                // --- STEP D: CCW got better -> Keep tracking CCW until light stops increasing ---
-                Serial.println("CCW improved. Tracking CCW...");
-                uint32_t previousLight = ccwLight;
+                // --- STEP E: CW improved or stayed equal -> Keep tracking CW until light stops increasing ---
+                Serial.println("CW improved. Tracking CW...");
+                uint32_t previousLight = cwLight;
                 while (true) {
-                    stepMotor(CCW, SEARCH_STEP_SIZE);
+                    stepMotor(CW, SEARCH_STEP_SIZE);
                     uint32_t nextLight = getCleanLightReading();
-                    Serial.printf("Tracking CCW - Average PAR: %u\n", nextLight);
+                    Serial.printf("Tracking CW - Average PAR: %u\n", nextLight);
+
+                    if (nextLight >= 20) {
+                        currentLight = nextLight;
+                        break;
+                    }
 
                     if (nextLight <= previousLight) {
                         // Light stopped increasing or dropped, step back one increment to peak position
-                        stepMotor(CW, SEARCH_STEP_SIZE); 
+                        stepMotor(CCW, SEARCH_STEP_SIZE); 
                         break;
                     }
                     previousLight = nextLight;
                 }
             }
-
-        } else {
-            // --- STEP E: CW improved or stayed equal -> Keep tracking CW until light stops increasing ---
-            Serial.println("CW improved. Tracking CW...");
-            uint32_t previousLight = cwLight;
-            while (true) {
-                stepMotor(CW, SEARCH_STEP_SIZE);
-                uint32_t nextLight = getCleanLightReading();
-                Serial.printf("Tracking CW - Average PAR: %u\n", nextLight);
-
-                if (nextLight <= previousLight) {
-                    // Light stopped increasing or dropped, step back one increment to peak position
-                    stepMotor(CCW, SEARCH_STEP_SIZE); 
-                    break;
-                }
-                previousLight = nextLight;
-            }
         }
-        Serial.println("Search complete. Resuming monitoring...");
+
+        Serial.println("Light level is above 20. Search complete, resuming monitoring...");
     }
 
     delay(250); // Normal check interval
