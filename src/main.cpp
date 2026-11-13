@@ -6,10 +6,15 @@
 // --- TCA9548A I2C MULTIPLEXER DEFINITION ---
 #define TCA_ADDR 0x70
 
-// --- TMC2209 PIN DEFINITIONS (Adjust to your wiring on the RP2350B) ---
+// --- SENSOR CHANNEL ASSIGNMENTS ---
+#define CHANNEL_PAR0  0  // Open-sky reference sensor (uncovered)
+#define CHANNEL_PAR1  1  // Under-panel sensor 1
+#define CHANNEL_PAR2  2  // Under-panel sensor 2
+#define CHANNEL_PAR3  3  // Under-panel sensor 3
+
+// --- TMC2209 PIN DEFINITIONS ---
 #define STEP_PIN    16
 #define DIR_PIN     17
-//#define EN_PIN    4   // Optional: TMC2209 enable pin (active low)
 
 // --- MOTOR SETTINGS ---
 #define CW          HIGH
@@ -17,129 +22,129 @@
 #define STEP_DELAY_US 1000 // Speed of motor steps (microseconds between pulses)
 #define SEARCH_STEP_SIZE 200 // Number of steps for a "slight" rotation
 
-// --- LIGHT THRESHOLD CONSTANTS ---
-//These use 1248 (arbitrary unit) as the full midday sun, targeting 70% as in Marrou et al
-#define TARGET_LIGHT  780
-#define LOWER_CUTOFF  873
-#define UPPER_CUTOFF  975
+// --- TIMING & FILTERING CONSTANTS ---
+#define CHECK_INTERVAL_MS 60000 // Take a monitoring reading once per minute (60,000 ms)
+#define TARGET_RATIO_PCT  70    // Target under-panel light is 70% of smoothed PAR0
+#define LOWER_CUTOFF_PCT  60    // Lower threshold (60% of smoothed PAR0)
+#define UPPER_CUTOFF_PCT  80    // Upper threshold (80% of smoothed PAR0)
+#define EMA_ALPHA         0.2f  // Smoothing factor for a ~5-minute window at 1 sample/minute
 
 Adafruit_AS7343 as7343;
+
+// Global variable for smoothed open-sky baseline
+float smoothedPAR0 = 0.0f;
+bool baselineInitialized = false;
 
 // Function prototypes
 void tcaSelect(uint8_t channel);
 void read_light(uint16_t *readings);
 uint32_t isolate_par(uint16_t *readings);
 void stepMotor(bool direction, int steps);
-uint32_t getCleanLightReading();
+uint32_t readSensorOnChannel(uint8_t channel);
+uint32_t getOpenSkyPAR();
+uint32_t getUnderPanelPAR();
 
 void setup() {
     Serial.begin(115200);
     while (!Serial && millis() < 3000);
-
     delay(2000);
-    Serial.println("Multi-Sensor TCA9548A & TMC2209 Initialization...");
-
-    // Configure Motor Pins
-    pinMode(STEP_PIN, OUTPUT);
-    pinMode(DIR_PIN, OUTPUT);
-    //pinMode(EN_PIN, OUTPUT);
-    //digitalWrite(EN_PIN, LOW); // Enable driver (active low)
 
     Wire.begin();
 
     // Initialize all 4 sensors across multiplexer channels 0 through 3
     for (uint8_t i = 0; i < 4; i++) {
         tcaSelect(i);
-        delay(10); // Short stabilization delay after switching channels
-
-        Serial.printf("Initializing Sensor on Channel %u...\n", i);
+        delay(10);
         if (!as7343.begin()) {
-            Serial.printf("Could not find AS7343 sensor on channel %u!\n", i);
             while (true) { delay(10); }
         }
         
-        // --- OUTDOOR OPTIMIZATION FOR BRIGHT SUNLIGHT ---
         as7343.setGain(AS7343_GAIN_0_5X);
         as7343.setATIME(29); 
         as7343.setASTEP(599);
-        
-        Serial.printf("Sensor on Channel %u initialized successfully!\n", i);
-        
-        // Test pulse on startup
-        for(int j = 0; j < 200; j++) {
-            digitalWrite(STEP_PIN, HIGH);
-            delayMicroseconds(500);
-            digitalWrite(STEP_PIN, LOW);
-            delayMicroseconds(500);
-        }
     }
 
-    Serial.println("\nAverage_PAR_Value");
+    // CSV Header row
+    Serial.println("Timestamp_ms,PAR0_Raw,SmoothedPAR0,UnderPanel_PAR,Target,LowerCutoff,UpperCutoff");
 }
 
 void loop() {
-    // 1. Get current average light level across all 4 sensors while stationary
-    uint32_t currentLight = getCleanLightReading();
-    Serial.printf("Current Average PAR: %u\n", currentLight);
+    // 1. Read live open-sky PAR0 and under-panel average
+    uint32_t par0 = getOpenSkyPAR();
+    uint32_t underPanelLight = getUnderPanelPAR();
 
-    // --- 2. LOWER CUTOFF CHECK (Light too dark -> Try to increase light) ---
-    if (currentLight < LOWER_CUTOFF) {
-        Serial.println("Average light dropped below lower cutoff. Initiating search and tracking loop to increase PAR...");
+    // Initialize smoothing filter instantly on the first reading
+    if (!baselineInitialized) {
+        smoothedPAR0 = (float)par0;
+        baselineInitialized = true;
+    } else {
+        // Apply Exponential Moving Average (EMA) to open-sky PAR0
+        smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+    }
 
-        while (currentLight < TARGET_LIGHT) {
-            currentLight = getCleanLightReading();
-            Serial.printf("Active Low-Light Search Loop - Current Average PAR: %u\n", currentLight);
+    // 2. Calculate dynamic thresholds based on the SMOOTHED baseline (~5 min window)
+    uint32_t targetLight   = ((uint32_t)smoothedPAR0 * TARGET_RATIO_PCT) / 100;
+    uint32_t lowerCutoff = ((uint32_t)smoothedPAR0 * LOWER_CUTOFF_PCT) / 100;
+    uint32_t upperCutoff = ((uint32_t)smoothedPAR0 * UPPER_CUTOFF_PCT) / 100;
 
-            if (currentLight >= TARGET_LIGHT) {
-                break; // Exit loop immediately if target is met
+    // 3. Print clean CSV row
+    Serial.printf("%lu,%u,%.1f,%u,%u,%u,%u\n", millis(), par0, smoothedPAR0, underPanelLight, targetLight, lowerCutoff, upperCutoff);
+
+    // --- 4. LOWER CUTOFF CHECK (Under-panel too dark -> Try to increase light) ---
+    if (underPanelLight < lowerCutoff) {
+        while (underPanelLight < targetLight) {
+            par0 = getOpenSkyPAR();
+            underPanelLight = getUnderPanelPAR();
+            
+            smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+            targetLight = ((uint32_t)smoothedPAR0 * TARGET_RATIO_PCT) / 100;
+            
+            Serial.printf("%lu,%u,%.1f,%u,%u,%u,%u\n", millis(), par0, smoothedPAR0, underPanelLight, targetLight, lowerCutoff, upperCutoff);
+
+            if (underPanelLight >= targetLight) {
+                break;
             }
 
-            uint32_t startLight = currentLight;
+            uint32_t startLight = underPanelLight;
 
             // --- STEP A: Rotate slightly Clockwise ---
             stepMotor(CW, SEARCH_STEP_SIZE);
-            uint32_t cwLight = getCleanLightReading();
-            Serial.printf("After CW move - Average PAR: %u\n", cwLight);
+            uint32_t cwLight = getUnderPanelPAR();
 
-            if (cwLight >= TARGET_LIGHT) {
-                currentLight = cwLight;
+            if (cwLight >= targetLight) {
                 break;
             }
 
             if (cwLight < startLight) {
                 // --- STEP B: CW was worse. Return to start, then try CCW ---
-                Serial.println("CW light is lower. Returning to start and trying CCW...");
-                stepMotor(CCW, SEARCH_STEP_SIZE); // Back to start
+                stepMotor(CCW, SEARCH_STEP_SIZE); 
+                stepMotor(CCW, SEARCH_STEP_SIZE); 
+                uint32_t ccwLight = getUnderPanelPAR();
 
-                stepMotor(CCW, SEARCH_STEP_SIZE); // Move CCW relative to start
-                uint32_t ccwLight = getCleanLightReading();
-                Serial.printf("After CCW move - Average PAR: %u\n", ccwLight);
-
-                if (ccwLight >= TARGET_LIGHT) {
-                    currentLight = ccwLight;
+                if (ccwLight >= targetLight) {
                     break;
                 }
 
                 if (ccwLight < startLight) {
                     // --- STEP C: Both CW and CCW lower than start -> Stay at starting position ---
-                    Serial.println("Both directions lower than start. Returning to starting position.");
-                    stepMotor(CW, SEARCH_STEP_SIZE); // Return to original position
+                    stepMotor(CW, SEARCH_STEP_SIZE); 
                 } else {
-                    // --- STEP D: CCW got better -> Keep tracking CCW until light stops increasing ---
-                    Serial.println("CCW improved. Tracking CCW...");
+                    // --- STEP D: CCW got better -> Keep tracking CCW ---
                     uint32_t previousLight = ccwLight;
                     while (true) {
                         stepMotor(CCW, SEARCH_STEP_SIZE);
-                        uint32_t nextLight = getCleanLightReading();
-                        Serial.printf("Tracking CCW - Average PAR: %u\n", nextLight);
+                        uint32_t nextLight = getUnderPanelPAR();
+                        
+                        par0 = getOpenSkyPAR();
+                        smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+                        targetLight = ((uint32_t)smoothedPAR0 * TARGET_RATIO_PCT) / 100;
 
-                        if (nextLight >= TARGET_LIGHT) {
-                            currentLight = nextLight;
+                        if (nextLight >= targetLight) {
                             break;
                         }
 
                         if (nextLight <= previousLight) {
-                            stepMotor(CW, SEARCH_STEP_SIZE); // Step back to peak position
+                            stepMotor(CW, SEARCH_STEP_SIZE); 
                             break;
                         }
                         previousLight = nextLight;
@@ -147,88 +152,84 @@ void loop() {
                 }
 
             } else {
-                // --- STEP E: CW improved or stayed equal -> Keep tracking CW until light stops increasing ---
-                Serial.println("CW improved. Tracking CW...");
+                // --- STEP E: CW improved -> Keep tracking CW ---
                 uint32_t previousLight = cwLight;
                 while (true) {
                     stepMotor(CW, SEARCH_STEP_SIZE);
-                    uint32_t nextLight = getCleanLightReading();
-                    Serial.printf("Tracking CW - Average PAR: %u\n", nextLight);
+                    uint32_t nextLight = getUnderPanelPAR();
 
-                    if (nextLight >= TARGET_LIGHT) {
-                        currentLight = nextLight;
+                    par0 = getOpenSkyPAR();
+                    smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+                    targetLight = ((uint32_t)smoothedPAR0 * TARGET_RATIO_PCT) / 100;
+
+                    if (nextLight >= targetLight) {
                         break;
                     }
 
                     if (nextLight <= previousLight) {
-                        stepMotor(CCW, SEARCH_STEP_SIZE); // Step back to peak position
+                        stepMotor(CCW, SEARCH_STEP_SIZE); 
                         break;
                     }
                     previousLight = nextLight;
                 }
             }
         }
-
-        Serial.println("Light level restored above target. Search complete, resuming monitoring...");
     }
-    // --- 3. UPPER CUTOFF CHECK (Light too bright -> Try to decrease light) ---
-    else if (currentLight > UPPER_CUTOFF) {
-        Serial.println("Average light exceeded upper cutoff. Initiating search and tracking loop to lower PAR...");
+    // --- 5. UPPER CUTOFF CHECK (Under-panel too bright -> Try to decrease light) ---
+    else if (underPanelLight > upperCutoff) {
+        while (underPanelLight > upperCutoff) {
+            par0 = getOpenSkyPAR();
+            underPanelLight = getUnderPanelPAR();
+            
+            smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+            upperCutoff = ((uint32_t)smoothedPAR0 * UPPER_CUTOFF_PCT) / 100;
 
-        while (currentLight > UPPER_CUTOFF) {
-            currentLight = getCleanLightReading();
-            Serial.printf("Active High-Light Search Loop - Current Average PAR: %u\n", currentLight);
+            Serial.printf("%lu,%u,%.1f,%u,%u,%u,%u\n", millis(), par0, smoothedPAR0, underPanelLight, targetLight, lowerCutoff, upperCutoff);
 
-            if (currentLight <= UPPER_CUTOFF) {
-                break; // Exit loop immediately if back within limits
+            if (underPanelLight <= upperCutoff) {
+                break;
             }
 
-            uint32_t startLight = currentLight;
+            uint32_t startLight = underPanelLight;
 
             // --- STEP A: Rotate slightly Counter-Clockwise (CCW) first ---
             stepMotor(CCW, SEARCH_STEP_SIZE);
-            uint32_t ccwLight = getCleanLightReading();
-            Serial.printf("After CCW move - Average PAR: %u\n", ccwLight);
+            uint32_t ccwLight = getUnderPanelPAR();
 
-            if (ccwLight <= UPPER_CUTOFF) {
-                currentLight = ccwLight;
+            if (ccwLight <= upperCutoff) {
                 break;
             }
 
             if (ccwLight > startLight) {
                 // --- STEP B: CCW increased PAR (worse). Return to start, then try CW ---
-                Serial.println("CCW light is higher. Returning to start and trying CW...");
-                stepMotor(CW, SEARCH_STEP_SIZE); // Back to start
+                stepMotor(CW, SEARCH_STEP_SIZE); 
+                stepMotor(CW, SEARCH_STEP_SIZE); 
+                uint32_t cwLight = getUnderPanelPAR();
 
-                stepMotor(CW, SEARCH_STEP_SIZE); // Move CW relative to start
-                uint32_t cwLight = getCleanLightReading();
-                Serial.printf("After CW move - Average PAR: %u\n", cwLight);
-
-                if (cwLight <= UPPER_CUTOFF) {
-                    currentLight = cwLight;
+                if (cwLight <= upperCutoff) {
                     break;
                 }
 
                 if (cwLight > startLight) {
                     // --- STEP C: Both CCW and CW higher than start -> Stay at starting position ---
-                    Serial.println("Both directions higher than start. Returning to starting position.");
-                    stepMotor(CCW, SEARCH_STEP_SIZE); // Return to original position
+                    stepMotor(CCW, SEARCH_STEP_SIZE); 
                 } else {
-                    // --- STEP D: CW got lower -> Keep tracking CW until light stops decreasing ---
-                    Serial.println("CW improved (lowered PAR). Tracking CW...");
+                    // --- STEP D: CW got lower -> Keep tracking CW ---
                     uint32_t previousLight = cwLight;
                     while (true) {
                         stepMotor(CW, SEARCH_STEP_SIZE);
-                        uint32_t nextLight = getCleanLightReading();
-                        Serial.printf("Tracking CW - Average PAR: %u\n", nextLight);
+                        uint32_t nextLight = getUnderPanelPAR();
 
-                        if (nextLight <= UPPER_CUTOFF) {
-                            currentLight = nextLight;
+                        par0 = getOpenSkyPAR();
+                        smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+                        upperCutoff = ((uint32_t)smoothedPAR0 * UPPER_CUTOFF_PCT) / 100;
+
+                        if (nextLight <= upperCutoff) {
                             break;
                         }
 
                         if (nextLight >= previousLight) {
-                            stepMotor(CCW, SEARCH_STEP_SIZE); // Step back to lowest position
+                            stepMotor(CCW, SEARCH_STEP_SIZE); 
                             break;
                         }
                         previousLight = nextLight;
@@ -236,37 +237,35 @@ void loop() {
                 }
 
             } else {
-                // --- STEP E: CCW improved or stayed equal -> Keep tracking CCW until light stops decreasing ---
-                Serial.println("CCW improved (lowered PAR). Tracking CCW...");
+                // --- STEP E: CCW improved -> Keep tracking CCW ---
                 uint32_t previousLight = ccwLight;
                 while (true) {
                     stepMotor(CCW, SEARCH_STEP_SIZE);
-                    uint32_t nextLight = getCleanLightReading();
-                    Serial.printf("Tracking CCW - Average PAR: %u\n", nextLight);
+                    uint32_t nextLight = getUnderPanelPAR();
 
-                    if (nextLight <= UPPER_CUTOFF) {
-                        currentLight = nextLight;
+                    par0 = getOpenSkyPAR();
+                    smoothedPAR0 = (EMA_ALPHA * (float)par0) + ((1.0f - EMA_ALPHA) * smoothedPAR0);
+                    upperCutoff = ((uint32_t)smoothedPAR0 * UPPER_CUTOFF_PCT) / 100;
+
+                    if (nextLight <= upperCutoff) {
                         break;
                     }
 
                     if (nextLight >= previousLight) {
-                        stepMotor(CW, SEARCH_STEP_SIZE); // Step back to lowest position
+                        stepMotor(CW, SEARCH_STEP_SIZE); 
                         break;
                     }
                     previousLight = nextLight;
                 }
             }
         }
-
-        Serial.println("Light level reduced below upper cutoff. Search complete, resuming monitoring...");
     }
 
-    delay(250); // Normal check interval
+    delay(CHECK_INTERVAL_MS); // Wait 1 minute before next monitoring check
 }
 
 // --- HELPER FUNCTIONS ---
 
-// Select channel (0-7) on TCA9548A multiplexer
 void tcaSelect(uint8_t channel) {
     if (channel > 7) return;
     Wire.beginTransmission(TCA_ADDR);
@@ -276,7 +275,6 @@ void tcaSelect(uint8_t channel) {
 
 void stepMotor(bool direction, int steps) {
     digitalWrite(DIR_PIN, direction);
-    // Motor is moving: NO sensor reads happen here
     for (int i = 0; i < steps; i++) {
         digitalWrite(STEP_PIN, HIGH);
         delayMicroseconds(STEP_DELAY_US / 2);
@@ -285,20 +283,24 @@ void stepMotor(bool direction, int steps) {
     }
 }
 
-uint32_t getCleanLightReading() {
-    delay(50); // Short settle delay after stopping motion
-    
+uint32_t readSensorOnChannel(uint8_t channel) {
+    tcaSelect(channel);
+    uint16_t readings[18];
+    read_light(readings);
+    return isolate_par(readings);
+}
+
+uint32_t getOpenSkyPAR() {
+    return readSensorOnChannel(CHANNEL_PAR0);
+}
+
+uint32_t getUnderPanelPAR() {
+    delay(50); 
     uint32_t total_par = 0;
-
-    // Loop through all 4 multiplexed channels and average their PAR values
-    for (uint8_t i = 0; i < 4; i++) {
-        tcaSelect(i);
-        uint16_t readings[18];
-        read_light(readings);
-        total_par += isolate_par(readings);
+    for (uint8_t i = 1; i <= 3; i++) {
+        total_par += readSensorOnChannel(i);
     }
-
-    return total_par / 4; // Return the average PAR across all 4 sensors
+    return total_par / 3;
 }
 
 void read_light(uint16_t *readings) {
